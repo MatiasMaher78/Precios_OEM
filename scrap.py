@@ -31,11 +31,7 @@ DEFAULT_BATCH = 500
 # ----------------------------
 def setup_scrap_folders(base_folder: str) -> Dict[str, str]:
     base = Path(base_folder)
-    folders = {
-        'input': base / 'Input',
-        'output': base / 'Output',
-        'done': base / 'Done'
-    }
+    folders = {"input": base / "Input", "output": base / "Output", "done": base / "Done"}
     for _, path in folders.items():
         path.mkdir(parents=True, exist_ok=True)
     return {k: str(v) for k, v in folders.items()}
@@ -44,7 +40,9 @@ def setup_scrap_folders(base_folder: str) -> Dict[str, str]:
 def locate_input_excel(input_folder: str) -> str:
     input_path = Path(input_folder)
     candidates = [f for f in input_path.glob("*.xlsx") if not f.name.startswith("~$") and not f.name.startswith(".")]
-    candidates.extend([f for f in input_path.glob("*.xls") if not f.name.startswith("~$") and not f.name.startswith(".")])
+    candidates.extend(
+        [f for f in input_path.glob("*.xls") if not f.name.startswith("~$") and not f.name.startswith(".")]
+    )
 
     if not candidates:
         raise FileNotFoundError(f"No se encontró ningún archivo Excel en {input_folder}")
@@ -59,11 +57,11 @@ def locate_input_excel(input_folder: str) -> str:
 
 
 def extract_date_from_filename(filename: str) -> Optional[str]:
-    match = re.search(r'(\d{8})', filename)
+    match = re.search(r"(\d{8})", filename)
     if match:
         return match.group(1)
 
-    match = re.search(r'(\d{4})[-_](\d{2})[-_](\d{2})', filename)
+    match = re.search(r"(\d{4})[-_](\d{2})[-_](\d{2})", filename)
     if match:
         return f"{match.group(1)}{match.group(2)}{match.group(3)}"
 
@@ -130,9 +128,27 @@ def build_ecooparts_search_url(query_text: str, *, page: int = 1, per_page: int 
     }
 
     ordered_keys = [
-        "pag", "busval", "filval", "panu", "tebu", "ord", "valo", "ubic", "toen", "veid",
-        "qregx", "tmin", "ttseu", "txbu", "ivevh", "ivevhmat", "ivevhsel", "ivevhcsver",
-        "ivevhse", "oem", "vin"
+        "pag",
+        "busval",
+        "filval",
+        "panu",
+        "tebu",
+        "ord",
+        "valo",
+        "ubic",
+        "toen",
+        "veid",
+        "qregx",
+        "tmin",
+        "ttseu",
+        "txbu",
+        "ivevh",
+        "ivevhmat",
+        "ivevhsel",
+        "ivevhcsver",
+        "ivevhse",
+        "oem",
+        "vin",
     ]
     query = "&".join(f"{k}={params[k]}" for k in ordered_keys)
     return f"https://ecooparts.com/recambios-automovil-segunda-mano/?{query}"
@@ -152,12 +168,12 @@ def extract_price_from_text(text: str) -> Optional[float]:
     text = text.strip()
 
     patterns = [
-        r'(\d{1,3}(?:\.\d{3})+,\d{2})',   # 1.234,56
-        r'(\d{1,3}(?:,\d{3})+\.\d{2})',   # 1,234.56
-        r'(\d+,\d{2})',                   # 47,74
-        r'(\d+\.\d{2})',                  # 47.74
-        r'(\d+,\d{1})',                   # 47,7
-        r'(\d+\.\d{1})',                  # 47.7
+        r"(\d{1,3}(?:\.\d{3})+,\d{2})",  # 1.234,56
+        r"(\d{1,3}(?:,\d{3})+\.\d{2})",  # 1,234.56
+        r"(\d+,\d{2})",  # 47,74
+        r"(\d+\.\d{2})",  # 47.74
+        r"(\d+,\d{1})",  # 47,7
+        r"(\d+\.\d{1})",  # 47.7
     ]
 
     for pattern in patterns:
@@ -167,15 +183,15 @@ def extract_price_from_text(text: str) -> Optional[float]:
 
         price_str = m.group(1)
 
-        if ',' in price_str and '.' in price_str:
-            last_comma = price_str.rfind(',')
-            last_dot = price_str.rfind('.')
+        if "," in price_str and "." in price_str:
+            last_comma = price_str.rfind(",")
+            last_dot = price_str.rfind(".")
             if last_comma > last_dot:
-                price_str = price_str.replace('.', '').replace(',', '.')
+                price_str = price_str.replace(".", "").replace(",", ".")
             else:
-                price_str = price_str.replace(',', '')
-        elif ',' in price_str:
-            price_str = price_str.replace(',', '.')
+                price_str = price_str.replace(",", "")
+        elif "," in price_str:
+            price_str = price_str.replace(",", ".")
 
         try:
             price = float(price_str)
@@ -206,6 +222,9 @@ def _run_coro_safely(coro):
 
     If there's a running loop, execute the coroutine in a new thread with
     its own event loop to avoid ``asyncio.run()`` errors.
+
+    DEPRECATED: Currently unused in the main flow. Kept for potential future
+    async detail fetches; prefer explicit async orchestration when needed.
     """
     try:
         loop = asyncio.get_running_loop()
@@ -253,8 +272,8 @@ _PRODUCT_LINK_SELECTORS = (
     'a[href*="/peca-auto-usada/"]'
 )
 
-# Selector exacto visto en tu ficha:
-_SINIVA_SELECTOR = ".product__price--siniva"
+# Selector exacto visto en tu ficha (deprecated: use `_PRICE_SELECTORS`):
+_SINIVA_SELECTOR = ".product__price--siniva"  # DEPRECATED
 _PRICE_SELECTORS = [
     ".product__price--siniva",
     ".product__price--siniva *",
@@ -292,6 +311,7 @@ class EcoopartsCounter:
     Exactitud: precios SIN IVA se extraen desde la FICHA (.product__price--siniva).
     El listado se usa solo para recolectar links.
     """
+
     def __init__(self, cfg: CounterConfig):
         self.cfg = cfg
         self._pw = None
@@ -334,9 +354,16 @@ class EcoopartsCounter:
             try:
                 blocked_resource_types = {"image", "stylesheet", "font", "media"}
                 blocked_domains = [
-                    "googlesyndication.com", "doubleclick.net", "google-analytics.com",
-                    "analytics", "ads", "adservice", "facebook.net", "facebook.com",
-                    "twitter.com", "scorecardresearch.com"
+                    "googlesyndication.com",
+                    "doubleclick.net",
+                    "google-analytics.com",
+                    "analytics",
+                    "ads",
+                    "adservice",
+                    "facebook.net",
+                    "facebook.com",
+                    "twitter.com",
+                    "scorecardresearch.com",
                 ]
 
                 def _route_handler(route, request):
@@ -421,7 +448,11 @@ class EcoopartsCounter:
             pass
 
     async def _fetch_details_async(self, links: List[str]) -> List[Optional[float]]:
-        """Usa async_playwright para abrir un solo navegador y extraer precios en múltiples pestañas concurrentes."""
+        """Usa async_playwright para abrir un solo navegador y extraer precios en múltiples pestañas concurrentes.
+
+        DEPRECATED in current architecture: prices are taken from listing;
+        detail fetch retained for future exactness checks or diagnostics.
+        """
         results: List[Optional[float]] = []
         try:
             from playwright.async_api import async_playwright
@@ -458,7 +489,11 @@ class EcoopartsCounter:
                                 pass
                             # aceptar cookies si aparece
                             try:
-                                for sel in ['button:has-text("Aceptar")','button:has-text("ACEPTAR")','button:has-text("Acepto")']:
+                                for sel in [
+                                    'button:has-text("Aceptar")',
+                                    'button:has-text("ACEPTAR")',
+                                    'button:has-text("Acepto")',
+                                ]:
                                     try:
                                         el = await page.query_selector(sel)
                                         if el:
@@ -485,7 +520,7 @@ class EcoopartsCounter:
                             try:
                                 body = await page.query_selector("body")
                                 if body:
-                                    body_text = (await body.inner_text() or "")
+                                    body_text = await body.inner_text() or ""
                                     price = extract_price_from_text(body_text)
                                     if price and price > 0:
                                         return price
@@ -568,7 +603,9 @@ class EcoopartsCounter:
                     except Exception:
                         # fallback: use evaluate to set value
                         try:
-                            self._page.evaluate("(s,v)=>{const el=document.querySelector(s); if(el) el.value=v}", sel, str(query_text))
+                            self._page.evaluate(
+                                "(s,v)=>{const el=document.querySelector(s); if(el) el.value=v}", sel, str(query_text)
+                            )
                         except Exception:
                             pass
                     filled = True
@@ -577,7 +614,11 @@ class EcoopartsCounter:
                 continue
 
         # Intentar clicar el botón de búsqueda
-        btn_selectors = ["button.search__button--end", "button.mobile-search__button", "button.search__button.search__button--end"]
+        btn_selectors = [
+            "button.search__button--end",
+            "button.mobile-search__button",
+            "button.search__button.search__button--end",
+        ]
         clicked = False
         for b in btn_selectors:
             try:
@@ -631,15 +672,17 @@ class EcoopartsCounter:
         def _on_request(request):
             try:
                 if request.resource_type in ("xhr", "fetch"):
-                    captured.append({
-                        "id": len(captured),
-                        "url": request.url,
-                        "method": request.method,
-                        "post_data": request.post_data or None,
-                        "headers": dict(request.headers or {}),
-                        "ts": time.time(),
-                        "response": None,
-                    })
+                    captured.append(
+                        {
+                            "id": len(captured),
+                            "url": request.url,
+                            "method": request.method,
+                            "post_data": request.post_data or None,
+                            "headers": dict(request.headers or {}),
+                            "ts": time.time(),
+                            "response": None,
+                        }
+                    )
             except Exception:
                 pass
 
@@ -798,7 +841,7 @@ class EcoopartsCounter:
 
                 # Fallback: buscar precios en el texto visible de la página
                 try:
-                    body_text = (self._detail_page.locator("body").inner_text() or "")
+                    body_text = self._detail_page.locator("body").inner_text() or ""
                     price = extract_price_from_text(body_text)
                     if price and price > 0:
                         if verbose:
@@ -950,12 +993,12 @@ class EcoopartsCounter:
         self.cache[q] = result
 
         if verbose:
-            print(f"\n[verbose] ===== RESUMEN QUERY =====")
+            print("\n[verbose] ===== RESUMEN QUERY =====")
             print(f"[verbose] precios en listado: {len(result.prices)}")
             if result.prices:
                 print(f"[verbose] min: €{result.min_price:.2f}")
                 print(f"[verbose] max: €{result.max_price:.2f}")
-            print(f"[verbose] ==========================\n")
+            print("[verbose] ==========================\n")
 
         return result
 
@@ -1015,38 +1058,21 @@ def process(
 
             result = counter.search(search_query, verbose=verbose)
 
-            # Si no hay resultados, probar variantes: tokens alfanuméricos y quitar primera palabra
+            # Si no hay resultados, probar una única variante: el token alfanumérico más largo (código OEM)
             if result.count == 0:
-                tried = []
-                # extraer tokens alfanuméricos largos (ej. 3A0949101A)
-                tokens = re.findall(r"\b[A-Za-z0-9]{4,}\b", search_text)
-                # probar el último token (normalmente el código)
-                for t in (tokens[::-1] if tokens else []):
-                    if t in tried:
-                        continue
-                    tried.append(t)
+                # extraer tokens alfanuméricos largos (ej. 9640795280)
+                tokens = re.findall(r"\b[A-Za-z0-9]{5,}\b", search_text)
+                if tokens:
+                    # priorizar el token más largo, que suele ser el código de pieza
+                    best_token = max(tokens, key=len)
                     if verbose:
-                        print(f"[verbose] Intentando variante token: '{t}' para fila {i+1}")
-                    vres = counter.search(t, verbose=verbose)
+                        print(f"[verbose] Fila {i+1}: Sin resultados. Intentando variante con código: '{best_token}'")
+
+                    vres = counter.search(best_token, verbose=verbose)
                     if vres.count > 0:
                         result = vres
                         if verbose:
-                            print(f"[verbose] Variante exitosa con token '{t}' -> links={vres.count}")
-                        break
-
-                # si aún 0, intentar quitar la primera palabra (ej. 'INTERMITENTE 3A0..' -> '3A0..')
-                if result.count == 0:
-                    parts = search_text.split()
-                    if len(parts) > 1:
-                        tail = " ".join(parts[1:])
-                        if tail not in tried:
-                            if verbose:
-                                print(f"[verbose] Intentando variante sin primera palabra: '{tail}'")
-                            vres = counter.search(tail, verbose=verbose)
-                            if vres.count > 0:
-                                result = vres
-                                if verbose:
-                                    print(f"[verbose] Variante exitosa con tail '{tail}' -> links={vres.count}")
+                            print(f"[verbose] Variante exitosa con token '{best_token}' -> links={vres.count}")
 
                 # Si todavía 0, guardar HTML de la página para debug
                 if result.count == 0 and debug_folder:
@@ -1133,13 +1159,16 @@ def process(
         units_col = out_count.astype(int)
 
     # Construir DataFrame final con el orden requerido: ID, OEM, Units, Max Price, Min Price
-    df_final = pd.DataFrame({
-        "ID": id_col,
-        "OEM": df_out["OEM"],
-        "Units": units_col,
-        "Max Price": max_col,
-        "Min Price": min_col,
-    }, index=df_out.index)
+    df_final = pd.DataFrame(
+        {
+            "ID": id_col,
+            "OEM": df_out["OEM"],
+            "Units": units_col,
+            "Max Price": max_col,
+            "Min Price": min_col,
+        },
+        index=df_out.index,
+    )
 
     return df_final, counter.cache
 
@@ -1193,7 +1222,9 @@ def main():
     # NUEVOS FLAGS para exactitud en ficha
     parser.add_argument("--detail-delay", type=float, default=0.25, help="Delay entre fichas (seg)")
     parser.add_argument("--detail-retries", type=int, default=2, help="Reintentos por ficha")
-    parser.add_argument("--max-details-per-query", type=int, default=0, help="Limitar fichas por búsqueda (0 = sin límite)")
+    parser.add_argument(
+        "--max-details-per-query", type=int, default=0, help="Limitar fichas por búsqueda (0 = sin límite)"
+    )
     parser.add_argument("--capture-xhr", default=None, help="Comma-separated queries to capture XHR/fetch and exit")
 
     args = parser.parse_args()
@@ -1224,7 +1255,7 @@ def main():
     print(f"  Output: {folders['output']}")
     print(f"  Done:   {folders['done']}")
 
-    input_file = locate_input_excel(folders['input'])
+    input_file = locate_input_excel(folders["input"])
     print(f"\nArchivo de entrada: {os.path.basename(input_file)}")
 
     df = read_workbook(input_file)
@@ -1247,7 +1278,7 @@ def main():
     print("=" * 70 + "\n")
 
     # Cache persistente para evitar reconsultas
-    cache_path = os.path.join(folders['output'], "cache_oem.json")
+    cache_path = os.path.join(folders["output"], "cache_oem.json")
     initial_cache = _load_cache_file(cache_path)
 
     # Si se solicita captura XHR, hacerlo para cada query y salir
@@ -1256,7 +1287,7 @@ def main():
         with EcoopartsCounter(cfg) as counter:
             for q in queries:
                 print(f"Capturando XHR para: '{q}'")
-                captures = counter.capture_xhr_for_query(q, folders['output'], verbose=args.verbose)
+                captures = counter.capture_xhr_for_query(q, folders["output"], verbose=args.verbose)
                 print(f"  Capturas: {len(captures)} (ver {folders['output']})")
         return
 
@@ -1268,12 +1299,12 @@ def main():
         counter_cfg=cfg,
         verbose=args.verbose,
         initial_cache=initial_cache,
-        debug_folder=folders['output'],
+        debug_folder=folders["output"],
     )
 
     input_filename = os.path.basename(input_file)
     output_filename = generate_output_filename(input_filename)
-    output_path = os.path.join(folders['output'], output_filename)
+    output_path = os.path.join(folders["output"], output_filename)
 
     try:
         df_out.to_excel(output_path, index=False)
@@ -1285,15 +1316,15 @@ def main():
             df_out.to_excel(alt_path, index=False)
             saved_path = alt_path
             print(f"✓ Archivo original bloqueado. Guardado como: {alt_path}")
-        except Exception as e:
+        except Exception:
             raise
 
-    print(f"\n" + "=" * 70)
+    print("\n" + "=" * 70)
     print(f"✓ Resultados guardados en: {saved_path}")
     print("=" * 70)
 
     if args.move_to_done:
-        done_path = os.path.join(folders['done'], input_filename)
+        done_path = os.path.join(folders["done"], input_filename)
         shutil.move(input_file, done_path)
         print(f"✓ Archivo de entrada movido a: {done_path}")
 

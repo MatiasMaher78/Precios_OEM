@@ -14,9 +14,7 @@ if not os.path.isdir(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " "AppleWebKit/537.36 (KHTML, like Gecko) " "Chrome/120.0 Safari/537.36"
 )
 
 
@@ -53,9 +51,27 @@ def build_ecooparts_search_url(query_text: str, *, page: int = 1, per_page: int 
     }
 
     ordered_keys = [
-        "pag", "busval", "filval", "panu", "tebu", "ord", "valo", "ubic", "toen", "veid",
-        "qregx", "tmin", "ttseu", "txbu", "ivevh", "ivevhmat", "ivevhsel", "ivevhcsver",
-        "ivevhse", "oem", "vin"
+        "pag",
+        "busval",
+        "filval",
+        "panu",
+        "tebu",
+        "ord",
+        "valo",
+        "ubic",
+        "toen",
+        "veid",
+        "qregx",
+        "tmin",
+        "ttseu",
+        "txbu",
+        "ivevh",
+        "ivevhmat",
+        "ivevhsel",
+        "ivevhcsver",
+        "ivevhse",
+        "oem",
+        "vin",
     ]
     query = "&".join(f"{k}={params[k]}" for k in ordered_keys)
     return f"https://ecooparts.com/recambios-automovil-segunda-mano/?{query}"
@@ -80,7 +96,11 @@ def manual_sequence(query: str):
     geo_payload = {"clientip": "45.179.75.234", "navv": "Chrome 120", "vert": "NAV:Chrome 120"}
     try:
         data = json.dumps(geo_payload).encode("utf-8")
-        req = urllib.request.Request(setgeo_url, data=data, headers={"Content-Type": "application/json", "User-Agent": USER_AGENT, "Referer": "https://ecooparts.com/"})
+        req = urllib.request.Request(
+            setgeo_url,
+            data=data,
+            headers={"Content-Type": "application/json", "User-Agent": USER_AGENT, "Referer": "https://ecooparts.com/"},
+        )
         with opener.open(req, timeout=15) as resp:
             _ = resp.read()
     except Exception as e:
@@ -90,7 +110,15 @@ def manual_sequence(query: str):
     sess_url = "https://ecooparts.com/session_data.php"
     sess_data = urllib.parse.urlencode({"action": "gettradu", "sessionValue": ""}).encode("utf-8")
     try:
-        req = urllib.request.Request(sess_url, data=sess_data, headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": USER_AGENT, "Referer": "https://ecooparts.com/"})
+        req = urllib.request.Request(
+            sess_url,
+            data=sess_data,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": USER_AGENT,
+                "Referer": "https://ecooparts.com/",
+            },
+        )
         with opener.open(req, timeout=15) as resp:
             _ = resp.read()
     except Exception as e:
@@ -124,7 +152,7 @@ def manual_sequence(query: str):
     return found
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python manual_seq.py 'QUERY1' ['QUERY2' ...]")
         sys.exit(1)
