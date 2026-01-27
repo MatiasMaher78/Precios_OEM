@@ -11,6 +11,8 @@ from typing import Dict, Optional, Set, List, Tuple
 from pathlib import Path
 import shutil
 import json
+import asyncio
+import threading
 
 import pandas as pd
 
@@ -199,6 +201,47 @@ class SearchResult:
         return max(self.prices) if self.prices else None
 
 
+def _run_coro_safely(coro):
+    """Run an awaitable safely even if an event loop is already running.
+
+    If there's a running loop, execute the coroutine in a new thread with
+    its own event loop to avoid ``asyncio.run()`` errors.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        result = {}
+
+        def _thread_target():
+            new_loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(new_loop)
+                res = new_loop.run_until_complete(coro)
+                result["res"] = res
+            except Exception as e:
+                result["exc"] = e
+            finally:
+                try:
+                    new_loop.close()
+                except Exception:
+                    pass
+
+        th = threading.Thread(target=_thread_target)
+        th.daemon = True
+        th.start()
+        th.join()
+
+        if "exc" in result:
+            raise result["exc"]
+        return result.get("res")
+
+    # no running loop -> safe to use asyncio.run
+    return asyncio.run(coro)
+
+
 # ----------------------------
 # Playwright config + selectors
 # ----------------------------
@@ -212,6 +255,14 @@ _PRODUCT_LINK_SELECTORS = (
 
 # Selector exacto visto en tu ficha:
 _SINIVA_SELECTOR = ".product__price--siniva"
+_PRICE_SELECTORS = [
+    ".product__price--siniva",
+    ".product__price--siniva *",
+    ".product__price",
+    ".product__price *",
+    ".product__price--iva",
+    ".product__price--iva *",
+]
 
 
 @dataclass
@@ -223,10 +274,14 @@ class CounterConfig:
     per_page: int = 30
     scroll_rounds: int = 10
     scroll_wait_ms: int = 800
+    block_resources: bool = True
 
     # NUEVO: ficha exacta
     detail_delay_s: float = 0.25
     detail_retries: int = 2
+
+    # Número de pestañas concurrentes a usar en el fetch asíncrono (1 = secuencial)
+    detail_workers: int = 2
 
     # NUEVO: útil para TEST (0 = sin límite, exacto sobre todos los links recolectados)
     max_details_per_query: int = 0
@@ -245,6 +300,8 @@ class EcoopartsCounter:
         self._page = None
         self._detail_page = None
         self.cache: Dict[str, SearchResult] = {}
+        self._route_handler = None
+        self._blocking_enabled = False
 
     def start(self):
         if sync_playwright is None:
@@ -273,36 +330,39 @@ class EcoopartsCounter:
         )
 
         # Request-blocking: abortar recursos que no afectan extracción
-        try:
-            blocked_resource_types = {"image", "stylesheet", "font", "media"}
-            blocked_domains = [
-                "googlesyndication.com", "doubleclick.net", "google-analytics.com",
-                "analytics", "ads", "adservice", "facebook.net", "facebook.com",
-                "twitter.com", "scorecardresearch.com"
-            ]
+        if self.cfg.block_resources:
+            try:
+                blocked_resource_types = {"image", "stylesheet", "font", "media"}
+                blocked_domains = [
+                    "googlesyndication.com", "doubleclick.net", "google-analytics.com",
+                    "analytics", "ads", "adservice", "facebook.net", "facebook.com",
+                    "twitter.com", "scorecardresearch.com"
+                ]
 
-            def _route_handler(route, request):
-                try:
-                    rtype = request.resource_type
-                    if rtype in blocked_resource_types:
-                        return route.abort()
-
-                    url = (request.url or "").lower()
-                    for d in blocked_domains:
-                        if d in url:
+                def _route_handler(route, request):
+                    try:
+                        rtype = request.resource_type
+                        if rtype in blocked_resource_types:
                             return route.abort()
 
-                    return route.continue_()
-                except Exception:
-                    try:
+                        url = (request.url or "").lower()
+                        for d in blocked_domains:
+                            if d in url:
+                                return route.abort()
+
                         return route.continue_()
                     except Exception:
-                        return None
+                        try:
+                            return route.continue_()
+                        except Exception:
+                            return None
 
-            self._context.route("**/*", _route_handler)
-        except Exception:
-            # En caso de que la versión de Playwright no soporte route en context
-            pass
+                self._context.route("**/*", _route_handler)
+                self._route_handler = _route_handler
+                self._blocking_enabled = True
+            except Exception:
+                # En caso de que la versión de Playwright no soporte route en context
+                pass
 
         self._page = self._context.new_page()
         self._page.set_default_timeout(self.cfg.timeout_ms)
@@ -348,6 +408,116 @@ class EcoopartsCounter:
     def _ensure_page(self):
         if self._page is None or self._detail_page is None:
             self.start()
+
+    def _disable_blocking(self):
+        if not self._context or not self._route_handler:
+            return
+        if not self._blocking_enabled:
+            return
+        try:
+            self._context.unroute("**/*", self._route_handler)
+            self._blocking_enabled = False
+        except Exception:
+            pass
+
+    async def _fetch_details_async(self, links: List[str]) -> List[Optional[float]]:
+        """Usa async_playwright para abrir un solo navegador y extraer precios en múltiples pestañas concurrentes."""
+        results: List[Optional[float]] = []
+        try:
+            from playwright.async_api import async_playwright
+        except Exception:
+            return results
+
+        try:
+            async with async_playwright() as apw:
+                launch_args = {"headless": self.cfg.headless}
+                if self.cfg.proxy:
+                    launch_args["proxy"] = {"server": self.cfg.proxy}
+
+                browser = await apw.chromium.launch(**launch_args)
+                context = await browser.new_context(
+                    locale="es-ES",
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1366, "height": 768},
+                )
+
+                sem = asyncio.Semaphore(self.cfg.detail_workers or 4)
+
+                async def _fetch(url: str) -> Optional[float]:
+                    async with sem:
+                        page = await context.new_page()
+                        try:
+                            await page.goto(url, wait_until="domcontentloaded", timeout=self.cfg.timeout_ms)
+                            try:
+                                await page.wait_for_load_state("networkidle", timeout=min(self.cfg.timeout_ms, 20000))
+                            except Exception:
+                                pass
+                            # aceptar cookies si aparece
+                            try:
+                                for sel in ['button:has-text("Aceptar")','button:has-text("ACEPTAR")','button:has-text("Acepto")']:
+                                    try:
+                                        el = await page.query_selector(sel)
+                                        if el:
+                                            await el.click()
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
+                            # intentar selectores
+                            for sel in _PRICE_SELECTORS:
+                                try:
+                                    el = await page.query_selector(sel)
+                                    if el:
+                                        cand = (await el.text_content() or "").strip()
+                                        if cand:
+                                            price = extract_price_from_text(cand)
+                                            if price and price > 0:
+                                                return price
+                                except Exception:
+                                    continue
+
+                            # fallback: texto body
+                            try:
+                                body = await page.query_selector("body")
+                                if body:
+                                    body_text = (await body.inner_text() or "")
+                                    price = extract_price_from_text(body_text)
+                                    if price and price > 0:
+                                        return price
+                            except Exception:
+                                pass
+
+                            return None
+                        except Exception:
+                            return None
+                        finally:
+                            try:
+                                await page.close()
+                            except Exception:
+                                pass
+
+                tasks = [_fetch(u) for u in links]
+                gathered = await asyncio.gather(*tasks)
+                results = list(gathered)
+
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+
+        except Exception:
+            return results
+
+        return results
 
     def get_search_page_html(self, query_text: str, *, page: int = 1) -> str:
         """Navega la URL de búsqueda para `query_text` y devuelve el HTML de la página (útil para debug)."""
@@ -611,15 +781,32 @@ class EcoopartsCounter:
 
                 self._try_accept_cookies(self._detail_page)
 
-                self._detail_page.wait_for_selector(_SINIVA_SELECTOR, timeout=min(self.cfg.timeout_ms, 15000))
-                txt = (self._detail_page.locator(_SINIVA_SELECTOR).first.text_content() or "").strip()
+                txt = ""
+                for sel in _PRICE_SELECTORS:
+                    try:
+                        self._detail_page.wait_for_selector(sel, timeout=min(self.cfg.timeout_ms, 8000))
+                        cand = (self._detail_page.locator(sel).first.text_content() or "").strip()
+                        if cand:
+                            txt = cand
+                            if verbose:
+                                print(f"[verbose] ficha price raw='{txt}' selector='{sel}' url={url}")
+                            price = extract_price_from_text(txt)
+                            if price and price > 0:
+                                return price
+                    except Exception:
+                        continue
 
-                if verbose:
-                    print(f"[verbose] ficha sinIVA raw='{txt}' url={url}")
+                # Fallback: buscar precios en el texto visible de la página
+                try:
+                    body_text = (self._detail_page.locator("body").inner_text() or "")
+                    price = extract_price_from_text(body_text)
+                    if price and price > 0:
+                        if verbose:
+                            print(f"[verbose] ficha price fallback body url={url}")
+                        return price
+                except Exception:
+                    pass
 
-                price = extract_price_from_text(txt)
-                if price and price > 0:
-                    return price
                 return None
 
             except Exception as e:
@@ -632,24 +819,54 @@ class EcoopartsCounter:
             print(f"[verbose] ficha FAIL definitivo: {last_err} url={url}")
         return None
 
+    def _collect_list_prices(self, *, verbose: bool = False) -> List[float]:
+        """Extrae precios directamente del listado."""
+        assert self._page is not None
+        selectors = [
+            ".product-card__price--current",
+            ".product-card__prices .product-card__price",
+            ".product-card__price",
+        ]
+        prices: List[float] = []
+
+        for sel in selectors:
+            try:
+                texts = self._page.locator(sel).all_inner_texts()
+                if verbose:
+                    print(f"[verbose] listado selector '{sel}' -> {len(texts)} textos")
+                for t in texts:
+                    p = extract_price_from_text(t)
+                    if p and p > 0:
+                        prices.append(p)
+            except Exception:
+                continue
+
+        return prices
+
     def search(self, query_text: str, *, verbose: bool = False) -> SearchResult:
         """
-        1) Recolecta links desde listado (paginado).
-        2) Abre cada ficha y extrae .product__price--siniva (exacto).
+        1) Navega el listado paginado.
+        2) Extrae precios DIRECTAMENTE del listado (sin entrar a fichas).
         """
         q = str(query_text or "").strip()
         if q == "":
             return SearchResult(count=0, prices=[])
 
         if q in self.cache:
+            cached = self.cache[q]
+            # No reutilizar caché con 0 resultados: puede quedar obsoleto
+            if cached.count > 0 or (cached.prices and len(cached.prices) > 0):
+                if verbose:
+                    print(f"[verbose] Cache hit para: '{q}'")
+                return cached
             if verbose:
-                print(f"[verbose] Cache hit para: '{q}'")
-            return self.cache[q]
+                print(f"[verbose] Cache miss (0 resultados) para: '{q}' -> reconsultando")
 
         self._ensure_page()
         assert self._page is not None
 
-        total_links: Set[str] = set()
+        all_prices: List[float] = []
+        all_links: Set[str] = set()
 
         for page_num in range(1, self.cfg.max_pages + 1):
             url = build_ecooparts_search_url(q, page=page_num, per_page=self.cfg.per_page)
@@ -666,45 +883,41 @@ class EcoopartsCounter:
 
                 self._try_accept_cookies(self._page)
 
-                try:
-                    self._page.wait_for_selector(_PRODUCT_LINK_SELECTORS, timeout=min(self.cfg.timeout_ms, 20000))
-                except PlaywrightTimeoutError:
-                    if verbose:
-                        print(f"[verbose] Página {page_num}: sin resultados (timeout selector). Stop.")
-                    break
-
+                # scroll para cargar más cards y recoger links visibles
                 page_links = self._scroll_to_load_more_links(verbose=verbose)
+                if page_links:
+                    all_links |= page_links
+
+                page_prices = self._collect_list_prices(verbose=verbose)
 
                 if verbose:
-                    print(f"[verbose] Página {page_num}: links encontrados={len(page_links)}")
+                    print(f"[verbose] Página {page_num}: precios encontrados={len(page_prices)}")
 
-                if not page_links:
-                    # si no hay links con la navegación por URL, intentar búsqueda interactiva (fallback)
+                if not page_prices:
+                    # fallback: búsqueda interactiva
                     try:
                         if verbose:
-                            print(f"[verbose] Página {page_num}: sin links con URL. Intentando búsqueda interactiva...")
+                            print(f"[verbose] Página {page_num}: sin precios. Intentando búsqueda interactiva...")
+                        self._disable_blocking()
                         inter_links = self._interactive_search_links(q, verbose=verbose)
                         if inter_links:
-                            page_links = inter_links
-                        else:
-                            if verbose:
-                                print(f"[verbose] Búsqueda interactiva no arrojó links para '{q}'")
-                            break
+                            all_links |= inter_links
+                        page_prices = self._collect_list_prices(verbose=verbose)
+                        if verbose:
+                            print(f"[verbose] Interactiva precios={len(page_prices)}")
                     except Exception:
-                        break
+                        pass
 
-                before_total = len(total_links)
-                total_links |= page_links
-                added = len(total_links) - before_total
-
-                # Si no agrega links nuevos, cortar
-                if page_num > 1 and added == 0:
+                if not page_prices:
+                    # sin precios -> cortar
                     if verbose:
-                        print(f"[verbose] Página {page_num}: 0 links nuevos. Stop.")
+                        print(f"[verbose] Página {page_num}: 0 precios. Stop.")
                     break
 
-                # Heurística de fin (si lista trae menos que per_page)
-                if len(page_links) < self.cfg.per_page:
+                all_prices.extend(page_prices)
+
+                # Heurística de fin (si trae menos que per_page)
+                if len(page_prices) < self.cfg.per_page:
                     if verbose:
                         print(f"[verbose] Página {page_num}: < per_page ({self.cfg.per_page}). Fin.")
                     break
@@ -714,37 +927,31 @@ class EcoopartsCounter:
                     print(f"[verbose] Error listado página {page_num}: {ex}")
                 break
 
-        # Extraer sin IVA exacto desde ficha
-        links_list = list(total_links)
+        # Preferir contar unidades a partir de los links HTML si están disponibles
+        result_count = len(all_links) if all_links else len(all_prices)
 
-        # Opción de test: limitar fichas por búsqueda
-        if self.cfg.max_details_per_query and self.cfg.max_details_per_query > 0:
-            links_list = links_list[: self.cfg.max_details_per_query]
-            if verbose:
-                print(f"[verbose] LIMITANDO fichas a {len(links_list)} por --max-details-per-query")
+        # Si detectamos que hay más precios que links (cards repetidas), calcular min/max
+        # sobre precios únicos para evitar sesgo por duplicados.
+        prices_for_minmax: List[float]
+        if all_prices and all_links and len(all_links) < len(all_prices):
+            # mantener orden pero quitar repeticiones exactas de precio
+            seen = set()
+            unique_prices: List[float] = []
+            for p in all_prices:
+                if p in seen:
+                    continue
+                seen.add(p)
+                unique_prices.append(p)
+            prices_for_minmax = unique_prices
+        else:
+            prices_for_minmax = all_prices
 
-        prices_exact: List[float] = []
-        if verbose:
-            print(f"\n[verbose] ===== FICHAS (sin IVA) =====")
-            print(f"[verbose] fichas a procesar: {len(links_list)}")
-
-        for idx, u in enumerate(links_list, start=1):
-            p = self._extract_siniva_from_detail(u, verbose=verbose)
-            if p and p > 0:
-                prices_exact.append(p)
-
-            if verbose and idx % 25 == 0:
-                print(f"[verbose] fichas: {idx}/{len(links_list)} | precios_ok={len(prices_exact)}")
-
-            time.sleep(self.cfg.detail_delay_s)
-
-        result = SearchResult(count=len(total_links), prices=prices_exact)
+        result = SearchResult(count=result_count, prices=prices_for_minmax)
         self.cache[q] = result
 
         if verbose:
             print(f"\n[verbose] ===== RESUMEN QUERY =====")
-            print(f"[verbose] links únicos: {result.count}")
-            print(f"[verbose] precios sin IVA OK: {len(result.prices)}")
+            print(f"[verbose] precios en listado: {len(result.prices)}")
             if result.prices:
                 print(f"[verbose] min: €{result.min_price:.2f}")
                 print(f"[verbose] max: €{result.max_price:.2f}")
@@ -880,22 +1087,48 @@ def process(
     # Asegurar columna OEM consistente (usar la columna detectada inicialmente)
     df_out["OEM"] = oem_search
 
-    # Priorizar valores existentes en columnas en español, si están presentes y no vacías.
-    def _has_nonempty(col: str) -> bool:
-        return col in df_out.columns and df_out[col].astype(str).str.strip().replace("", pd.NA).notna().any()
+    # Priorizar valores existentes por fila si son válidos (>0); si no, usar calculados.
+    def _merge_price_column(existing: pd.Series, computed: pd.Series) -> pd.Series:
+        out = computed.copy()
+        for idx, val in existing.astype(str).fillna("").items():
+            v = val.strip()
+            if not v:
+                continue
+            price = extract_price_from_text(v)
+            if price is None:
+                # permitir enteros simples sin decimales
+                if re.fullmatch(r"\d+", v):
+                    try:
+                        price = float(v)
+                    except Exception:
+                        price = None
+            if price is not None and price > 0:
+                out.iloc[idx] = v
+        return out
 
-    if _has_nonempty("PRECIO MAXIMO"):
-        max_col = df_out["PRECIO MAXIMO"].astype(str).fillna("")
+    def _merge_units_column(existing: pd.Series, computed: pd.Series) -> pd.Series:
+        out = computed.copy()
+        for idx, val in existing.items():
+            try:
+                num = pd.to_numeric(val, errors="coerce")
+            except Exception:
+                num = None
+            if num is not None and pd.notna(num) and float(num) > 0:
+                out.iloc[idx] = int(num)
+        return out
+
+    if "PRECIO MAXIMO" in df_out.columns:
+        max_col = _merge_price_column(df_out["PRECIO MAXIMO"], out_max)
     else:
         max_col = out_max
 
-    if _has_nonempty("PRECIO MINIMO"):
-        min_col = df_out["PRECIO MINIMO"].astype(str).fillna("")
+    if "PRECIO MINIMO" in df_out.columns:
+        min_col = _merge_price_column(df_out["PRECIO MINIMO"], out_min)
     else:
         min_col = out_min
 
-    if _has_nonempty("CANTIDAD"):
-        units_col = df_out["CANTIDAD"].astype(int)
+    if "CANTIDAD" in df_out.columns:
+        units_col = _merge_units_column(df_out["CANTIDAD"], out_count)
     else:
         units_col = out_count.astype(int)
 
@@ -955,6 +1188,7 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Logs detallados de depuración")
     parser.add_argument("--headful", action="store_true", help="Muestra el navegador")
     parser.add_argument("--move-to-done", action="store_true", help="Mover archivo procesado a Done/")
+    parser.add_argument("--no-blocking", action="store_true", help="Desactivar bloqueo de recursos")
 
     # NUEVOS FLAGS para exactitud en ficha
     parser.add_argument("--detail-delay", type=float, default=0.25, help="Delay entre fichas (seg)")
@@ -1005,6 +1239,7 @@ def main():
         detail_delay_s=args.detail_delay,
         detail_retries=args.detail_retries,
         max_details_per_query=args.max_details_per_query,
+        block_resources=not args.no_blocking,
     )
 
     print("\n" + "=" * 70)
