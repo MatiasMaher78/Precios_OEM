@@ -61,3 +61,9 @@ python tools/clean.py
 ## Rendimiento
 - `max_pages=5`, `scroll_rounds=3`, `timeout_ms=10000`, `scroll_wait_ms=500`.
 - Bloqueo de recursos (imágenes, fuentes, etc.) para acelerar carga del listado.
+# Setup
+python -m pip install -r requirements.txt
+python -m playwright install chromium
+
+# Run sample (diagnostic)
+python scrap.py --scrap-folder ".\sample" --headful --no-blocking --verbose --timeout 20000 --max-pages 10 --per-page 30
