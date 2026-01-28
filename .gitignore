@@ -20,4 +20,7 @@ Output/
 # Secrets
 .env
 
+# Allow sample inputs for CI/Codex
+!sample/**/Input/*.xlsx
+!sample/**/Input/*.xls
 
