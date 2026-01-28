@@ -24,3 +24,7 @@ Output/
 !sample/**/Input/*.xlsx
 !sample/**/Input/*.xls
 
+# Allow sample input (only inside sample/Input)
+!sample/Input/*.xlsx
+!sample/Input/*.xls
+
