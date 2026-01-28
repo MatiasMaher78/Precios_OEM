@@ -28,3 +28,6 @@ Output/
 !sample/Input/*.xlsx
 !sample/Input/*.xls
 
+# Allow sample inputs for CI/Codex
+!sample/**/Input/*.csv
+!sample/Input/*.csv
