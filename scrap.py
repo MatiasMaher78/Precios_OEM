@@ -38,6 +38,10 @@ def setup_scrap_folders(base_folder: str) -> Dict[str, str]:
 
 
 def locate_input_excel(input_folder: str) -> str:
+    """
+    DEPRECATED: se mantiene por compatibilidad, pero el flujo principal
+    debe usar load_input_df(scrap_folder) que prioriza CSV.
+    """
     input_path = Path(input_folder)
     candidates = [f for f in input_path.glob("*.xlsx") if not f.name.startswith("~$") and not f.name.startswith(".")]
     candidates.extend(
@@ -76,10 +80,103 @@ def generate_output_filename(input_filename: str) -> str:
 
 
 # ----------------------------
-# Excel I/O
+# Input helpers (CSV-first)
+# ----------------------------
+def _detect_delimiter(sample_path: Path) -> str:
+    """
+    Detección simple de delimitador para CSV (',' vs ';').
+    """
+    try:
+        head = sample_path.read_text(encoding="utf-8", errors="ignore")[:4096]
+    except Exception:
+        head = sample_path.read_text(encoding="latin-1", errors="ignore")[:4096]
+
+    # Heurística: en ES es común ';' en CSV exportados por Excel
+    if head.count(";") > head.count(","):
+        return ";"
+    return ","
+
+
+def pick_input_file(input_dir: Path) -> Path:
+    """
+    Prioriza CSV para evitar dependencia openpyxl en entornos sin red.
+    Si no hay CSV, usa XLSX/XLS.
+    """
+    if not input_dir.exists():
+        raise FileNotFoundError(f"No existe la carpeta Input: {input_dir}")
+
+    csvs = sorted([p for p in input_dir.glob("*.csv") if p.is_file() and not p.name.startswith("~$")])
+    if csvs:
+        return csvs[0]
+
+    xlsxs = sorted([p for p in input_dir.glob("*.xlsx") if p.is_file() and not p.name.startswith("~$")])
+    if xlsxs:
+        return xlsxs[0]
+
+    xls = sorted([p for p in input_dir.glob("*.xls") if p.is_file() and not p.name.startswith("~$")])
+    if xls:
+        return xls[0]
+
+    raise FileNotFoundError(f"No encontré archivos .csv/.xlsx/.xls en {input_dir}")
+
+
+def load_input_df(scrap_folder: str) -> pd.DataFrame:
+    """
+    Carga el input desde <scrap_folder>/Input.
+    - Si hay CSV: pd.read_csv (sin openpyxl)
+    - Si hay XLSX/XLS: intenta pd.read_excel (requiere openpyxl/xlrd)
+    """
+    base = Path(scrap_folder)
+    input_dir = base / "Input"
+    input_file = pick_input_file(input_dir)
+
+    suffix = input_file.suffix.lower()
+
+    if suffix == ".csv":
+        sep = _detect_delimiter(input_file)
+        # Intentar utf-8, fallback latin-1
+        try:
+            return pd.read_csv(input_file, sep=sep, dtype=str, keep_default_na=False)
+        except UnicodeDecodeError:
+            return pd.read_csv(input_file, sep=sep, dtype=str, keep_default_na=False, encoding="latin-1")
+
+    # Excel: requiere openpyxl (xlsx) o xlrd (xls)
+    try:
+        return pd.read_excel(input_file, sheet_name=0, dtype=str).fillna("")
+    except ImportError as e:
+        raise ImportError(
+            f"Falta dependencia para leer Excel ({input_file.name}). "
+            f"Solución recomendada: dejar un CSV en Input/ (ya soportado) "
+            f"o instalar openpyxl/xlrd según corresponda."
+        ) from e
+
+
+# ----------------------------
+# Input I/O (compat)
 # ----------------------------
 def read_workbook(path: str) -> pd.DataFrame:
-    return pd.read_excel(path, sheet_name=0, dtype=str).fillna("")
+    """
+    Compatibilidad retro: si alguien llama read_workbook(), intentamos leer.
+    Pero para Codex/CI se debe usar load_input_df(scrap_folder), que prioriza CSV.
+    """
+    p = Path(path)
+    suf = p.suffix.lower()
+
+    if suf == ".csv":
+        sep = _detect_delimiter(p)
+        try:
+            return pd.read_csv(p, sep=sep, dtype=str, keep_default_na=False)
+        except UnicodeDecodeError:
+            return pd.read_csv(p, sep=sep, dtype=str, keep_default_na=False, encoding="latin-1")
+
+    # Excel (requiere openpyxl/xlrd)
+    try:
+        return pd.read_excel(p, sheet_name=0, dtype=str).fillna("")
+    except ImportError as e:
+        raise ImportError(
+            f"Falta dependencia para leer Excel ({p.name}). "
+            f"Solución: dejar un CSV en Input/ (ya soportado) o instalar openpyxl/xlrd."
+        ) from e
 
 
 def get_col(df: pd.DataFrame, names, fallback_idx: int) -> pd.Series:
@@ -217,9 +314,6 @@ class SearchResult:
         return max(self.prices) if self.prices else None
 
 
-# Nota: Se eliminaron los helpers async obsoletos no usados en el flujo principal.
-
-
 def _run_coro_safely(coro):
     """Run an awaitable safely even if an event loop is already running.
 
@@ -260,7 +354,6 @@ def _run_coro_safely(coro):
             raise result["exc"]
         return result.get("res")
 
-    # no running loop -> safe to use asyncio.run
     return asyncio.run(coro)
 
 
@@ -389,7 +482,6 @@ class EcoopartsCounter:
                 self._route_handler = _route_handler
                 self._blocking_enabled = True
             except Exception:
-                # En caso de que la versión de Playwright no soporte route en context
                 pass
 
         self._page = self._context.new_page()
@@ -484,7 +576,6 @@ class EcoopartsCounter:
                         page = await context.new_page()
                         try:
                             await page.goto(url, wait_until="domcontentloaded", timeout=self.cfg.timeout_ms)
-                            # OPTIMIZADO: removido networkidle wait
 
                             # aceptar cookies si aparece
                             try:
@@ -560,7 +651,6 @@ class EcoopartsCounter:
         url = build_ecooparts_search_url(query_text, page=page, per_page=self.cfg.per_page)
         try:
             self._page.goto(url, wait_until="domcontentloaded")
-            # OPTIMIZADO: removido networkidle wait
             self._try_accept_cookies(self._page)
             try:
                 return self._page.content()
@@ -639,8 +729,6 @@ class EcoopartsCounter:
         for attempt in range(1, self.cfg.detail_retries + 2):
             try:
                 self._detail_page.goto(url, wait_until="domcontentloaded")
-                # OPTIMIZADO: removido networkidle wait
-
                 self._try_accept_cookies(self._detail_page)
 
                 txt = ""
@@ -738,8 +826,6 @@ class EcoopartsCounter:
 
             try:
                 self._page.goto(url, wait_until="domcontentloaded")
-                # OPTIMIZADO: removido networkidle wait
-
                 self._try_accept_cookies(self._page)
 
                 # scroll para cargar más cards y recoger links visibles
@@ -752,18 +838,13 @@ class EcoopartsCounter:
                 if verbose:
                     print(f"[verbose] Página {page_num}: precios encontrados={len(page_prices)}")
 
-                # OPTIMIZADO: Removida la búsqueda interactiva como fallback (muy lenta)
-
                 if not page_prices:
-                    # sin precios -> cortar
                     if verbose:
                         print(f"[verbose] Página {page_num}: 0 precios. Stop.")
                     break
 
                 all_prices.extend(page_prices)
 
-                # OPTIMIZADO: Early exit mejorado
-                # Si tenemos suficientes datos (50+ precios), podemos detener
                 if len(all_prices) >= 50:
                     if verbose:
                         print(
@@ -772,7 +853,6 @@ class EcoopartsCounter:
                         )
                     break
 
-                # Heurística de fin (si trae menos que per_page)
                 if len(page_prices) < self.cfg.per_page:
                     if verbose:
                         print(f"[verbose] Página {page_num}: < per_page ({self.cfg.per_page}). Fin.")
@@ -783,14 +863,10 @@ class EcoopartsCounter:
                     print(f"[verbose] Error listado página {page_num}: {ex}")
                 break
 
-        # Preferir contar unidades a partir de los links HTML si están disponibles
         result_count = len(all_links) if all_links else len(all_prices)
 
-        # Si detectamos que hay más precios que links (cards repetidas), calcular min/max
-        # sobre precios únicos para evitar sesgo por duplicados.
         prices_for_minmax: List[float]
         if all_prices and all_links and len(all_links) < len(all_prices):
-            # mantener orden pero quitar repeticiones exactas de precio
             seen = set()
             unique_prices: List[float] = []
             for p in all_prices:
@@ -849,9 +925,9 @@ def process(
         counter_cfg = CounterConfig()
 
     with EcoopartsCounter(counter_cfg) as counter:
-        # Cargar cache inicial (persistente) si fue provista
         if initial_cache:
             counter.cache.update(initial_cache)
+
         for i in range(start, end):
             search_text = str(oem_search.iloc[i]).strip()
 
@@ -860,7 +936,6 @@ def process(
                 print(f"Fila {i+1}/{n} -> SKIP (vacío)")
                 continue
 
-            # Ajustes específicos para mejorar coincidencias en Ecooparts
             try:
                 search_query = re.sub(r"\bmandos\b", "mando", search_text, flags=re.I)
             except Exception:
@@ -871,12 +946,9 @@ def process(
 
             result = counter.search(search_query, verbose=verbose)
 
-            # Si no hay resultados, probar una única variante: el token alfanumérico más largo (código OEM)
             if result.count == 0:
-                # extraer tokens alfanuméricos largos (ej. 9640795280)
                 tokens = re.findall(r"\b[A-Za-z0-9]{5,}\b", search_text)
                 if tokens:
-                    # priorizar el token más largo, que suele ser el código de pieza
                     best_token = max(tokens, key=len)
                     if verbose:
                         print(f"[verbose] Fila {i+1}: Sin resultados. Intentando variante con código: '{best_token}'")
@@ -887,7 +959,6 @@ def process(
                         if verbose:
                             print(f"[verbose] Variante exitosa con token '{best_token}' -> links={vres.count}")
 
-                # Si todavía 0, guardar HTML de la página para debug
                 if result.count == 0 and debug_folder:
                     try:
                         html = counter.get_search_page_html(search_query)
@@ -918,16 +989,13 @@ def process(
 
     df_out = df.copy()
 
-    # Preparar columna ID (si no existe, crear secuencial)
     if "ID" in df_out.columns:
         id_col = df_out["ID"]
     else:
         id_col = pd.Series(range(1, len(df_out) + 1), index=df_out.index)
 
-    # Asegurar columna OEM consistente (usar la columna detectada inicialmente)
     df_out["OEM"] = oem_search
 
-    # Priorizar valores existentes por fila si son válidos (>0); si no, usar calculados.
     def _merge_price_column(existing: pd.Series, computed: pd.Series) -> pd.Series:
         out = computed.copy()
         for idx, val in existing.astype(str).fillna("").items():
@@ -936,7 +1004,6 @@ def process(
                 continue
             price = extract_price_from_text(v)
             if price is None:
-                # permitir enteros simples sin decimales
                 if re.fullmatch(r"\d+", v):
                     try:
                         price = float(v)
@@ -972,7 +1039,6 @@ def process(
     else:
         units_col = out_count.astype(int)
 
-    # Construir DataFrame final con el orden requerido: ID, OEM, Units, Max Price, Min Price
     df_final = pd.DataFrame(
         {
             "ID": id_col,
@@ -1069,11 +1135,23 @@ def main():
     print(f"  Output: {folders['output']}")
     print(f"  Done:   {folders['done']}")
 
-    input_file = locate_input_excel(folders["input"])
-    print(f"\nArchivo de entrada: {os.path.basename(input_file)}")
-
-    df = read_workbook(input_file)
+    # 1) Cargar input (CSV-first para evitar openpyxl en Codex)
+    df = load_input_df(scrap_folder)
+    print(f"\nInput cargado desde: {os.path.join(scrap_folder, 'Input')}")
     print(f"Filas totales: {len(df)}")
+
+    # 2) Para naming del output, elegimos el archivo detectado (si existe)
+    #    (solo para fecha en el nombre; la lectura real fue con load_input_df)
+    try:
+        input_dir = Path(scrap_folder) / "Input"
+        detected = pick_input_file(input_dir)
+        input_file = str(detected)
+        input_filename = detected.name
+    except Exception:
+        input_file = ""
+        input_filename = f"Input_{datetime.now().strftime('%Y%m%d')}.csv"
+
+    print(f"Archivo detectado (para nombre): {input_filename}")
 
     cfg = CounterConfig(
         headless=not args.headful,
@@ -1091,17 +1169,14 @@ def main():
     print("INICIANDO EXTRACCIÓN EXACTA (SIN IVA CONFIRMADO EN FICHA)")
     print("=" * 70 + "\n")
 
-    # Cache persistente para evitar reconsultas
     cache_path = os.path.join(folders["output"], "cache_oem.json")
     initial_cache = _load_cache_file(cache_path)
 
-    # Si se solicita captura XHR, hacerlo para cada query y salir
     if args.capture_xhr:
         queries = [q.strip() for q in args.capture_xhr.split(",") if q.strip()]
-        with EcoopartsCounter(cfg) as counter:  # noqa: F841 (crea contexto aunque no se use)
+        with EcoopartsCounter(cfg) as counter:  # noqa: F841
             for q in queries:
                 print(f"Capturando XHR para: '{q}'")
-                # Nota: capture_xhr_for_query fue removida al eliminar búsqueda interactiva
                 print("  [AVISO] Función capture_xhr_for_query no disponible en versión optimizada")
         return
 
@@ -1116,33 +1191,33 @@ def main():
         debug_folder=folders["output"],
     )
 
-    input_filename = os.path.basename(input_file)
     output_filename = generate_output_filename(input_filename)
     output_path = os.path.join(folders["output"], output_filename)
 
+    saved_path = output_path
+
+    # Intentar guardar XLSX (requiere openpyxl). Si falla, guardar CSV.
     try:
         df_out.to_excel(output_path, index=False)
-        saved_path = output_path
-    except PermissionError:
-        base, ext = os.path.splitext(output_path)
-        alt_path = f"{base}_alt_{int(time.time())}{ext}"
-        try:
-            df_out.to_excel(alt_path, index=False)
-            saved_path = alt_path
-            print(f"✓ Archivo original bloqueado. Guardado como: {alt_path}")
-        except Exception:
-            raise
+    except Exception as e:
+        base, _ = os.path.splitext(output_path)
+        csv_path = f"{base}.csv"
+        df_out.to_csv(csv_path, index=False, encoding="utf-8")
+        saved_path = csv_path
+        print(f"⚠️ No pude guardar XLSX ({e}). Guardado como CSV: {csv_path}")
 
     print("\n" + "=" * 70)
     print(f"✓ Resultados guardados en: {saved_path}")
     print("=" * 70)
 
-    if args.move_to_done:
+    if args.move_to_done and input_file:
         done_path = os.path.join(folders["done"], input_filename)
-        shutil.move(input_file, done_path)
-        print(f"✓ Archivo de entrada movido a: {done_path}")
+        try:
+            shutil.move(input_file, done_path)
+            print(f"✓ Archivo de entrada movido a: {done_path}")
+        except Exception as e:
+            print(f"⚠️ No pude mover a Done/: {e}")
 
-    # Guardar cache persistente
     try:
         _save_cache_file(cache_path, merged_cache)
         print(f"✓ Caché guardada en: {cache_path}")
@@ -1152,3 +1227,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
