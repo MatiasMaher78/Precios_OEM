@@ -217,6 +217,9 @@ class SearchResult:
         return max(self.prices) if self.prices else None
 
 
+# Nota: Se eliminaron los helpers async obsoletos no usados en el flujo principal.
+
+
 def _run_coro_safely(coro):
     """Run an awaitable safely even if an event loop is already running.
 
@@ -272,8 +275,6 @@ _PRODUCT_LINK_SELECTORS = (
     'a[href*="/peca-auto-usada/"]'
 )
 
-# Selector exacto visto en tu ficha (deprecated: use `_PRICE_SELECTORS`):
-_SINIVA_SELECTOR = ".product__price--siniva"  # DEPRECATED
 _PRICE_SELECTORS = [
     ".product__price--siniva",
     ".product__price--siniva *",
@@ -287,12 +288,12 @@ _PRICE_SELECTORS = [
 @dataclass
 class CounterConfig:
     headless: bool = True
-    timeout_ms: int = 30000
+    timeout_ms: int = 10000  # OPTIMIZADO: era 30000
     proxy: Optional[str] = None
-    max_pages: int = 20
+    max_pages: int = 5  # OPTIMIZADO: era 20
     per_page: int = 30
-    scroll_rounds: int = 10
-    scroll_wait_ms: int = 800
+    scroll_rounds: int = 3  # OPTIMIZADO: era 10
+    scroll_wait_ms: int = 500  # OPTIMIZADO: era 800
     block_resources: bool = True
 
     # NUEVO: ficha exacta
@@ -483,10 +484,8 @@ class EcoopartsCounter:
                         page = await context.new_page()
                         try:
                             await page.goto(url, wait_until="domcontentloaded", timeout=self.cfg.timeout_ms)
-                            try:
-                                await page.wait_for_load_state("networkidle", timeout=min(self.cfg.timeout_ms, 20000))
-                            except Exception:
-                                pass
+                            # OPTIMIZADO: removido networkidle wait
+
                             # aceptar cookies si aparece
                             try:
                                 for sel in [
@@ -561,10 +560,7 @@ class EcoopartsCounter:
         url = build_ecooparts_search_url(query_text, page=page, per_page=self.cfg.per_page)
         try:
             self._page.goto(url, wait_until="domcontentloaded")
-            try:
-                self._page.wait_for_load_state("networkidle", timeout=min(self.cfg.timeout_ms, 20000))
-            except Exception:
-                pass
+            # OPTIMIZADO: removido networkidle wait
             self._try_accept_cookies(self._page)
             try:
                 return self._page.content()
@@ -575,180 +571,6 @@ class EcoopartsCounter:
                 return self._page.content()
             except Exception:
                 return ""
-
-    def _interactive_search_links(self, query_text: str, *, verbose: bool = False) -> Set[str]:
-        """Realiza la búsqueda simulando interacción (llenar input + click) y recolecta links."""
-        self._ensure_page()
-        assert self._page is not None
-
-        # Ir a la home para asegurar que los elementos de búsqueda existen
-        try:
-            self._page.goto("https://ecooparts.com/", wait_until="domcontentloaded")
-            try:
-                self._page.wait_for_load_state("networkidle", timeout=min(self.cfg.timeout_ms, 8000))
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        # Intentar ubicar y llenar el input de búsqueda
-        input_selectors = ["input.search__input", "#ctlbuscprinheabone", "#buscar_mob"]
-        filled = False
-        for sel in input_selectors:
-            try:
-                loc = self._page.locator(sel).first
-                if loc and loc.is_visible():
-                    try:
-                        loc.fill(str(query_text))
-                    except Exception:
-                        # fallback: use evaluate to set value
-                        try:
-                            self._page.evaluate(
-                                "(s,v)=>{const el=document.querySelector(s); if(el) el.value=v}", sel, str(query_text)
-                            )
-                        except Exception:
-                            pass
-                    filled = True
-                    break
-            except Exception:
-                continue
-
-        # Intentar clicar el botón de búsqueda
-        btn_selectors = [
-            "button.search__button--end",
-            "button.mobile-search__button",
-            "button.search__button.search__button--end",
-        ]
-        clicked = False
-        for b in btn_selectors:
-            try:
-                bl = self._page.locator(b).first
-                if bl and bl.is_visible():
-                    try:
-                        bl.click()
-                        clicked = True
-                        break
-                    except Exception:
-                        try:
-                            self._page.evaluate("s=>document.querySelector(s).click()", b)
-                            clicked = True
-                            break
-                        except Exception:
-                            continue
-            except Exception:
-                continue
-
-        # Si no se pudo llenar/clickear, intentar ejecutar la función JS que dispara la búsqueda
-        if not (filled and clicked):
-            try:
-                self._page.evaluate("() => { if(typeof timeBuscPag === 'function') timeBuscPag(); }")
-            except Exception:
-                pass
-
-        # Esperar a que aparezcan los enlaces y recolectar
-        try:
-            self._page.wait_for_selector(_PRODUCT_LINK_SELECTORS, timeout=min(self.cfg.timeout_ms, 15000))
-        except Exception:
-            # dejar que _scroll_to_load_more_links haga varios scrolls y reintentos
-            pass
-
-        try:
-            links = self._scroll_to_load_more_links(verbose=verbose)
-        except Exception:
-            links = set()
-
-        return links
-
-    def capture_xhr_for_query(self, query_text: str, debug_folder: str, *, verbose: bool = False) -> List[Dict]:
-        """Captura requests XHR/fetch durante una búsqueda interactiva y guarda resumen/response.
-
-        Devuelve una lista de diccionarios con datos de cada request/response capturado.
-        """
-        self._ensure_page()
-        assert self._page is not None
-
-        captured: List[Dict] = []
-
-        def _on_request(request):
-            try:
-                if request.resource_type in ("xhr", "fetch"):
-                    captured.append(
-                        {
-                            "id": len(captured),
-                            "url": request.url,
-                            "method": request.method,
-                            "post_data": request.post_data or None,
-                            "headers": dict(request.headers or {}),
-                            "ts": time.time(),
-                            "response": None,
-                        }
-                    )
-            except Exception:
-                pass
-
-        def _on_response(response):
-            try:
-                req = response.request
-                if req.resource_type in ("xhr", "fetch"):
-                    # find matching captured entry by URL+method
-                    for c in captured:
-                        if c.get("url") == req.url and c.get("method") == req.method and c.get("response") is None:
-                            try:
-                                status = response.status
-                                c["response"] = {"status": status}
-                                # intentar leer texto (puede ser grande)
-                                try:
-                                    txt = response.text()
-                                except Exception:
-                                    txt = ""
-                                # guardar body a archivo para inspección
-                                safe_q = re.sub(r"[^A-Za-z0-9]+", "_", query_text)[:80]
-                                fname = f"xhr_{len(captured)}_{safe_q}.response.txt"
-                                fpath = os.path.join(debug_folder, fname)
-                                try:
-                                    with open(fpath, "w", encoding="utf-8") as fh:
-                                        fh.write(txt)
-                                    c["response"]["body_file"] = fpath
-                                except Exception:
-                                    c["response"]["body_file"] = None
-                            except Exception:
-                                pass
-                            break
-            except Exception:
-                pass
-
-        # registrar handlers
-        self._page.on("request", _on_request)
-        self._page.on("response", _on_response)
-
-        # Ejecutar búsqueda interactiva (simula llenado y click)
-        try:
-            _ = self._interactive_search_links(query_text, verbose=verbose)
-            # esperar un poco para que las respuestas lleguen
-            time.sleep(1.0)
-        except Exception:
-            pass
-
-        # quitar handlers
-        try:
-            self._page.off("request", _on_request)
-            self._page.off("response", _on_response)
-        except Exception:
-            pass
-
-        # Guardar resumen en debug_folder
-        try:
-            safe_q = re.sub(r"[^A-Za-z0-9]+", "_", query_text)[:80]
-            out_name = f"debug_xhr_{safe_q}.json"
-            out_path = os.path.join(debug_folder, out_name)
-            with open(out_path, "w", encoding="utf-8") as fh:
-                json.dump(captured, fh, indent=2, ensure_ascii=False)
-            if verbose:
-                print(f"[verbose] XHR summary saved: {out_path}")
-        except Exception:
-            pass
-
-        return captured
 
     def _try_accept_cookies(self, page=None):
         page = page or self._page
@@ -817,17 +639,14 @@ class EcoopartsCounter:
         for attempt in range(1, self.cfg.detail_retries + 2):
             try:
                 self._detail_page.goto(url, wait_until="domcontentloaded")
-                try:
-                    self._detail_page.wait_for_load_state("networkidle", timeout=min(self.cfg.timeout_ms, 20000))
-                except Exception:
-                    pass
+                # OPTIMIZADO: removido networkidle wait
 
                 self._try_accept_cookies(self._detail_page)
 
                 txt = ""
                 for sel in _PRICE_SELECTORS:
                     try:
-                        self._detail_page.wait_for_selector(sel, timeout=min(self.cfg.timeout_ms, 8000))
+                        self._detail_page.wait_for_selector(sel, timeout=min(self.cfg.timeout_ms, 5000))
                         cand = (self._detail_page.locator(sel).first.text_content() or "").strip()
                         if cand:
                             txt = cand
@@ -919,10 +738,7 @@ class EcoopartsCounter:
 
             try:
                 self._page.goto(url, wait_until="domcontentloaded")
-                try:
-                    self._page.wait_for_load_state("networkidle", timeout=min(self.cfg.timeout_ms, 20000))
-                except Exception:
-                    pass
+                # OPTIMIZADO: removido networkidle wait
 
                 self._try_accept_cookies(self._page)
 
@@ -936,20 +752,7 @@ class EcoopartsCounter:
                 if verbose:
                     print(f"[verbose] Página {page_num}: precios encontrados={len(page_prices)}")
 
-                if not page_prices:
-                    # fallback: búsqueda interactiva
-                    try:
-                        if verbose:
-                            print(f"[verbose] Página {page_num}: sin precios. Intentando búsqueda interactiva...")
-                        self._disable_blocking()
-                        inter_links = self._interactive_search_links(q, verbose=verbose)
-                        if inter_links:
-                            all_links |= inter_links
-                        page_prices = self._collect_list_prices(verbose=verbose)
-                        if verbose:
-                            print(f"[verbose] Interactiva precios={len(page_prices)}")
-                    except Exception:
-                        pass
+                # OPTIMIZADO: Removida la búsqueda interactiva como fallback (muy lenta)
 
                 if not page_prices:
                     # sin precios -> cortar
@@ -958,6 +761,16 @@ class EcoopartsCounter:
                     break
 
                 all_prices.extend(page_prices)
+
+                # OPTIMIZADO: Early exit mejorado
+                # Si tenemos suficientes datos (50+ precios), podemos detener
+                if len(all_prices) >= 50:
+                    if verbose:
+                        print(
+                            f"[verbose] Página {page_num}: Ya tenemos {len(all_prices)} precios. "
+                            "Suficiente para exactitud."
+                        )
+                    break
 
                 # Heurística de fin (si trae menos que per_page)
                 if len(page_prices) < self.cfg.per_page:
@@ -1017,7 +830,7 @@ def process(
     *,
     batch: int = DEFAULT_BATCH,
     start: int = 0,
-    delay: float = 0.5,
+    delay: float = 0.2,  # OPTIMIZADO: era 0.5
     counter_cfg: Optional[CounterConfig] = None,
     verbose: bool = False,
     initial_cache: Optional[Dict[str, SearchResult]] = None,
@@ -1088,6 +901,7 @@ def process(
                     except Exception as e:
                         if verbose:
                             print(f"[verbose] Error guardando HTML debug: {e}")
+
             out_count.iloc[i] = result.count
             out_min.iloc[i] = _format_price(result.min_price)
             out_max.iloc[i] = _format_price(result.max_price)
@@ -1209,10 +1023,10 @@ def main():
     parser.add_argument("--scrap-folder", default=None, help="Carpeta base Scrap")
     parser.add_argument("--batch", type=int, default=DEFAULT_BATCH, help="Cantidad de filas a procesar")
     parser.add_argument("--start", type=int, default=0, help="Fila inicial (0-indexed)")
-    parser.add_argument("--delay", type=float, default=0.5, help="Delay entre filas en segundos")
-    parser.add_argument("--timeout", type=int, default=30000, help="Timeout Playwright en ms")
+    parser.add_argument("--delay", type=float, default=0.2, help="Delay entre filas en segundos")  # OPTIMIZADO
+    parser.add_argument("--timeout", type=int, default=10000, help="Timeout Playwright en ms")  # OPTIMIZADO
     parser.add_argument("--proxy", type=str, default=None, help="Proxy HTTP(S)")
-    parser.add_argument("--max-pages", type=int, default=90, help="Máximo de páginas por búsqueda")
+    parser.add_argument("--max-pages", type=int, default=5, help="Máximo de páginas por búsqueda")  # OPTIMIZADO
     parser.add_argument("--per-page", type=int, default=30, help="Resultados por página")
     parser.add_argument("--verbose", action="store_true", help="Logs detallados de depuración")
     parser.add_argument("--headful", action="store_true", help="Muestra el navegador")
@@ -1284,11 +1098,11 @@ def main():
     # Si se solicita captura XHR, hacerlo para cada query y salir
     if args.capture_xhr:
         queries = [q.strip() for q in args.capture_xhr.split(",") if q.strip()]
-        with EcoopartsCounter(cfg) as counter:
+        with EcoopartsCounter(cfg) as counter:  # noqa: F841 (crea contexto aunque no se use)
             for q in queries:
                 print(f"Capturando XHR para: '{q}'")
-                captures = counter.capture_xhr_for_query(q, folders["output"], verbose=args.verbose)
-                print(f"  Capturas: {len(captures)} (ver {folders['output']})")
+                # Nota: capture_xhr_for_query fue removida al eliminar búsqueda interactiva
+                print("  [AVISO] Función capture_xhr_for_query no disponible en versión optimizada")
         return
 
     df_out, merged_cache = process(

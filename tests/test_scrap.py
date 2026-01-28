@@ -22,6 +22,16 @@ def test_generate_output_filename_uses_date_in_name():
     assert out == "Output_20260123.xlsx"
 
 
+def test_generate_output_filename_defaults_today():
+    name = "Input.xlsx"
+    out = scrap.generate_output_filename(name)
+    # Debe usar fecha de hoy con formato YYYYMMDD
+    from datetime import datetime
+
+    today = datetime.now().strftime("%Y%m%d")
+    assert out == f"Output_{today}.xlsx"
+
+
 def test_build_search_url_contains_expected_params():
     url = scrap.build_ecooparts_search_url("CAJA MARIPOSA AIRE 9640795280", page=1, per_page=30)
     assert url.startswith("https://ecooparts.com/recambios-automovil-segunda-mano/?")
@@ -72,3 +82,17 @@ def test_process_uses_longest_token_when_no_results(monkeypatch):
     assert out_df.iloc[0]["Units"] == 5
     assert out_df.iloc[0]["Min Price"].startswith("€")
     assert out_df.iloc[0]["Max Price"].startswith("€")
+
+
+def test_cache_roundtrip(tmp_path):
+    # Guardar y cargar caché debe preservar estructura básica
+    cache_file = tmp_path / "cache_oem.json"
+    cache = {
+        "QUERY": scrap.SearchResult(count=3, prices=[5.0, 7.0, 6.0]),
+    }
+    scrap._save_cache_file(str(cache_file), cache)
+    loaded = scrap._load_cache_file(str(cache_file))
+    assert "QUERY" in loaded
+    assert loaded["QUERY"].count == 3
+    assert loaded["QUERY"].min_price == 5.0
+    assert loaded["QUERY"].max_price == 7.0

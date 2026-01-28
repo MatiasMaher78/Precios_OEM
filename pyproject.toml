@@ -3,3 +3,15 @@ line-length = 120
 target-version = ["py310", "py311"]
 include = "\\.py$"
 exclude = "(\\.venv|__pycache__|\\.git|Output|Input|Done)"
+
+[tool.flake8]
+max-line-length = 120
+extend-ignore = ["E203", "W503"]
+exclude = [
+	".venv",
+	"__pycache__",
+	".git",
+	"Output",
+	"Input",
+	"Done",
+]
