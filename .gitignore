@@ -1,9 +1,23 @@
-﻿.venv/
+﻿# Python
+.venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Pytest
+.pytest_cache/
+
+# Outputs / debug
 Output/
 *.log
-.env
+
+# Data files
 *.xlsx
 *.xls
 *.csv
+
+# Secrets
+.env
+
+
