@@ -951,7 +951,7 @@ class EcoopartsCounter:
 def _format_price(price: Optional[float]) -> str:
     if price is None:
         return "0.00"
-    return f"€{price:.2f}"
+    return f"{price:.2f}"
 
 
 def process(
@@ -1002,9 +1002,26 @@ def process(
             if result.count == 0:
                 tokens = re.findall(r"\b[A-Za-z0-9]{5,}\b", search_text)
                 if tokens:
-                    best_token = max(tokens, key=len)
+                    # Filtrar tokens: preferir alfanuméricos mixtos (con letras Y números)
+                    # para evitar fallback a palabras genéricas como "CATALIZADOR", "ANTENA", etc.
+                    # que generan falsos positivos.
+                    mixed_tokens = [t for t in tokens if re.search(r"\d", t) and re.search(r"[A-Za-z]", t)]
+                    
+                    # Si hay tokens mixtos, usar el más largo de esos; sino usar el más largo general
+                    candidates = mixed_tokens if mixed_tokens else tokens
+                    best_token = max(candidates, key=len)
+                    
                     if verbose:
-                        print(f"[verbose] Fila {i+1}: Sin resultados. Intentando variante con código: '{best_token}'")
+                        if mixed_tokens:
+                            print(
+                                f"[verbose] Fila {i+1}: Sin resultados. "
+                                f"Intentando variante con código alfanumérico: '{best_token}'"
+                            )
+                        else:
+                            print(
+                                f"[verbose] Fila {i+1}: Sin resultados. "
+                                f"Intentando variante con token: '{best_token}' (sin códigos alfanuméricos mixtos)"
+                            )
 
                     vres = counter.search(best_token, verbose=verbose)
                     if vres.count > 0:

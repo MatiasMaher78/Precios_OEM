@@ -190,3 +190,27 @@ def test_collect_list_prices_without_discount_preference():
     prices = counter._collect_list_prices(verbose=False)
     # Al desactivar prefer_discounted, debería tomar el old (92.40)
     assert 92.40 in prices or 83.16 in prices
+
+
+def test_fallback_prefers_alphanumeric_tokens():
+    """Test que el fallback prefiere tokens alfanuméricos mixtos sobre palabras."""
+    import re
+    
+    # Simular la lógica de fallback
+    test_cases = [
+        ("CATALIZADOR MR597649", "MR597649"),  # Debe preferir código alfanumérico
+        ("ANTENA 6561TS", "6561TS"),
+        ("ASIENTO 8906GC", "8906GC"),
+        ("MECANISMO 6RU959801", "6RU959801"),
+        ("PILOTO ABC", "PILOTO"),  # Si no hay alfanuméricos mixtos, usar el más largo
+    ]
+    
+    for search_text, expected_token in test_cases:
+        tokens = re.findall(r"\b[A-Za-z0-9]{5,}\b", search_text)
+        # Filtrar tokens alfanuméricos mixtos
+        mixed_tokens = [t for t in tokens if re.search(r"\d", t) and re.search(r"[A-Za-z]", t)]
+        candidates = mixed_tokens if mixed_tokens else tokens
+        best_token = max(candidates, key=len)
+        
+        assert best_token == expected_token, f"Para '{search_text}' esperaba '{expected_token}' pero obtuvo '{best_token}'"
+
