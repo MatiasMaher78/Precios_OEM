@@ -398,6 +398,8 @@ class CounterConfig:
 
     # NUEVO: útil para TEST (0 = sin límite, exacto sobre todos los links recolectados)
     max_details_per_query: int = 0
+    # Preferir precio publicado con descuento en listado (True = usar precio con descuento cuando exista)
+    prefer_discounted: bool = True
 
 
 class EcoopartsCounter:
@@ -697,6 +699,8 @@ class EcoopartsCounter:
 
     def _scroll_to_load_more_links(self, *, verbose: bool = False) -> Set[str]:
         assert self._page is not None
+        # Wait for initial JS to load products (increased from 800ms for better reliability)
+        self._page.wait_for_timeout(1500)
         all_links = self._collect_links()
         stable_rounds = 0
 
@@ -772,23 +776,72 @@ class EcoopartsCounter:
     def _collect_list_prices(self, *, verbose: bool = False) -> List[float]:
         """Extrae precios directamente del listado."""
         assert self._page is not None
-        selectors = [
-            ".product-card__price--current",
-            ".product-card__prices .product-card__price",
-            ".product-card__price",
-        ]
         prices: List[float] = []
 
-        for sel in selectors:
+        # Nueva estrategia: iterar por cada tarjeta/product-card y
+        # preferir el precio con descuento (p. ej. `.product-card__price--new` o `.product-card__price--current`)
+        # Si no existe precio 'new' usar el `--old` o selector genérico.
+        # Conservamos la estrategia anterior como comentario por compatibilidad.
+        # Anteriormente se usaban selectores globales y se extraían todos los textos:
+        # selectors = [
+        #     ".product-card__price--current",
+        #     ".product-card__prices .product-card__price",
+        #     ".product-card__price",
+        # ]
+        # for sel in selectors:
+        #     texts = self._page.locator(sel).all_inner_texts()
+        #     for t in texts: ...
+
+        # Selector para cada card (captura variantes de estructura)
+        card_selector = "div.products-list__content > div.products-list__item, div.product-card"
+
+        try:
+            cards = self._page.query_selector_all(card_selector)
+        except Exception:
+            # Fallback a la estrategia antigua si la API difiere
             try:
-                texts = self._page.locator(sel).all_inner_texts()
-                if verbose:
-                    print(f"[verbose] listado selector '{sel}' -> {len(texts)} textos")
-                for t in texts:
-                    p = extract_price_from_text(t)
-                    if p and p > 0:
-                        prices.append(p)
+                selectors = [
+                    ".product-card__price--current",
+                    ".product-card__prices .product-card__price",
+                    ".product-card__price",
+                ]
+                for sel in selectors:
+                    texts = self._page.locator(sel).all_inner_texts()
+                    if verbose:
+                        print(f"[verbose] listado selector '{sel}' -> {len(texts)} textos (fallback)")
+                    for t in texts:
+                        p = extract_price_from_text(t)
+                        if p and p > 0:
+                            prices.append(p)
             except Exception:
+                pass
+            return prices
+
+        for c in cards:
+            try:
+                # Prioridad: precio 'new' o 'current' (descuento publicado)
+                if self.cfg.prefer_discounted:
+                    el = c.query_selector(
+                        ".product-card__price--new, .product-card__price--current, .product-card__price--current"
+                    )
+                else:
+                    el = None
+
+                # Si no se encontró precio 'new' o preferencia desactivada, buscar old/generic
+                if not el:
+                    el = c.query_selector(
+                        ".product-card__price--old, .product-card__prices .product-card__price, .product-card__price"
+                    )
+
+                if not el:
+                    continue
+
+                text = el.inner_text().strip()
+                p = extract_price_from_text(text)
+                if p and p > 0:
+                    prices.append(p)
+            except Exception:
+                # ignorar errores por tarjeta
                 continue
 
         return prices
@@ -967,8 +1020,7 @@ def process(
                         fpath = os.path.join(debug_folder, fname)
                         with open(fpath, "w", encoding="utf-8") as fh:
                             fh.write(html)
-                        if verbose:
-                            print(f"[verbose] HTML debug guardado en: {fpath}")
+                        print(f"[!] Fila {i+1} sin resultados. HTML debug: {fpath}")
                     except Exception as e:
                         if verbose:
                             print(f"[verbose] Error guardando HTML debug: {e}")
@@ -1106,6 +1158,13 @@ def main():
         "--max-details-per-query", type=int, default=0, help="Limitar fichas por búsqueda (0 = sin límite)"
     )
     parser.add_argument("--capture-xhr", default=None, help="Comma-separated queries to capture XHR/fetch and exit")
+    parser.add_argument(
+        "--no-prefer-discounted",
+        action="store_false",
+        dest="prefer_discounted",
+        help="No priorizar precios con descuento en el listado (usar precio 'old' si existe)",
+    )
+    parser.set_defaults(prefer_discounted=True)
 
     args = parser.parse_args()
 
@@ -1163,6 +1222,7 @@ def main():
         detail_retries=args.detail_retries,
         max_details_per_query=args.max_details_per_query,
         block_resources=not args.no_blocking,
+        prefer_discounted=args.prefer_discounted,
     )
 
     print("\n" + "=" * 70)
@@ -1227,4 +1287,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

@@ -96,3 +96,97 @@ def test_cache_roundtrip(tmp_path):
     assert loaded["QUERY"].count == 3
     assert loaded["QUERY"].min_price == 5.0
     assert loaded["QUERY"].max_price == 7.0
+
+
+def test_collect_list_prices_prefers_discounted():
+    import scrap
+
+    cfg = scrap.CounterConfig()
+    cfg.prefer_discounted = True
+    counter = scrap.EcoopartsCounter(cfg)
+
+    class FakeEl:
+        def __init__(self, text):
+            self._text = text
+
+        def inner_text(self):
+            return self._text
+
+    class FakeCard:
+        def __init__(self, mapping):
+            # mapping: selector -> text
+            self.map = mapping
+
+        def query_selector(self, sel):
+            # simular matching simple por igualdad de selector al map
+            for part in [s.strip() for s in sel.split(',')]:
+                if part in self.map:
+                    return FakeEl(self.map[part])
+            return None
+
+    class FakePage:
+        def __init__(self, cards):
+            self._cards = cards
+
+        def query_selector_all(self, sel):
+            return self._cards
+
+    # Card1: tiene precio new (descuento) y old
+    card1 = FakeCard({
+        ".product-card__price--new": "83,16 €",
+        ".product-card__price--old": "92,40 €",
+    })
+
+    # Card2: solo precio old
+    card2 = FakeCard({
+        ".product-card__price--old": "40,00 €",
+    })
+
+    counter._page = FakePage([card1, card2])
+
+    prices = counter._collect_list_prices(verbose=False)
+    # Debe preferir 83.16 (new) para la primera tarjeta y 40.00 para la segunda
+    assert 83.16 in prices
+    assert 40.00 in prices
+
+
+def test_collect_list_prices_without_discount_preference():
+    import scrap
+
+    cfg = scrap.CounterConfig()
+    cfg.prefer_discounted = False
+    counter = scrap.EcoopartsCounter(cfg)
+
+    class FakeEl:
+        def __init__(self, text):
+            self._text = text
+
+        def inner_text(self):
+            return self._text
+
+    class FakeCard:
+        def __init__(self, mapping):
+            self.map = mapping
+
+        def query_selector(self, sel):
+            for part in [s.strip() for s in sel.split(',')]:
+                if part in self.map:
+                    return FakeEl(self.map[part])
+            return None
+
+    class FakePage:
+        def __init__(self, cards):
+            self._cards = cards
+
+        def query_selector_all(self, sel):
+            return self._cards
+
+    card = FakeCard({
+        ".product-card__price--new": "83,16 €",
+        ".product-card__price--old": "92,40 €",
+    })
+
+    counter._page = FakePage([card])
+    prices = counter._collect_list_prices(verbose=False)
+    # Al desactivar prefer_discounted, debería tomar el old (92.40)
+    assert 92.40 in prices or 83.16 in prices

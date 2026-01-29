@@ -20,6 +20,7 @@ Este checklist cubre los flujos principales del proyecto sin depender de servici
 - Optimizaciones de rendimiento:
   - `max_pages=5`, `scroll_rounds=3`, early exit al tener suficientes precios (≥50) o cuando la página trae menos que `per_page`.
   - `timeout_ms=10000` y menor `scroll_wait_ms` mantienen la extracción estable.
+  - **Fix de timing (2026-01-23):** Agregado `wait_for_timeout(1500)` después de `page.goto()` y antes del primer scroll para permitir que JavaScript renderice las product cards. Sin esta espera inicial, Ecooparts muestra HTML básico pero los cards se cargan dinámicamente después, resultando en extracción de 0 links/precios.
 
 - Deprecaciones:
   - Las rutas de detalle (`_fetch_details_async` y `_extract_siniva_from_detail`) muestran advertencias si se llegan a invocar; la extracción principal usa el listado.
