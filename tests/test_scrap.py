@@ -190,7 +190,7 @@ def test_collect_list_prices_without_discount_preference():
     prices = counter._collect_list_prices(verbose=False)
     # Al desactivar prefer_discounted, debería tomar el old (92.40)
     assert 92.40 in prices or 83.16 in prices
-
+vs
 
 def test_fallback_prefers_alphanumeric_tokens():
     """Test que el fallback prefiere tokens alfanuméricos mixtos sobre palabras."""

@@ -23,7 +23,7 @@ except Exception:
     PlaywrightTimeoutError = Exception  # type: ignore
 
 
-DEFAULT_BATCH = 500
+DEFAULT_BATCH = 1000
 
 
 # ----------------------------
@@ -1214,7 +1214,8 @@ def main():
     # 1) Cargar input (CSV-first para evitar openpyxl en Codex)
     df = load_input_df(scrap_folder)
     print(f"\nInput cargado desde: {os.path.join(scrap_folder, 'Input')}")
-    print(f"Filas totales: {len(df)}")
+    total_rows = len(df)
+    print(f"Filas totales: {total_rows}")
 
     # 2) Para naming del output, elegimos el archivo detectado (si existe)
     #    (solo para fecha en el nombre; la lectura real fue con load_input_df)
@@ -1287,13 +1288,19 @@ def main():
     print(f"✓ Resultados guardados en: {saved_path}")
     print("=" * 70)
 
+    # Mover a Done solo si se completó el procesamiento de todas las filas
+    processed_end = min(total_rows, args.start + args.batch)
+    processed_all = processed_end >= total_rows
     if args.move_to_done and input_file:
-        done_path = os.path.join(folders["done"], input_filename)
-        try:
-            shutil.move(input_file, done_path)
-            print(f"✓ Archivo de entrada movido a: {done_path}")
-        except Exception as e:
-            print(f"⚠️ No pude mover a Done/: {e}")
+        if processed_all:
+            done_path = os.path.join(folders["done"], input_filename)
+            try:
+                shutil.move(input_file, done_path)
+                print(f"✓ Archivo de entrada movido a: {done_path}")
+            except Exception as e:
+                print(f"⚠️ No pude mover a Done/: {e}")
+        else:
+            print("↷ Archivo NO movido a Done (procesamiento parcial).")
 
     try:
         _save_cache_file(cache_path, merged_cache)
